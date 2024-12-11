@@ -1,0 +1,12 @@
+{
+    "window_width": 500,
+    "window_height": 45,
+    "idle_endurance": 5,
+    "maxlen":40,
+    "rows":2,
+    "opacity":0.75,
+    "fg":"white",
+    "bg":"black",
+    "font_type":"Courier New",
+    "font_size":14
+}

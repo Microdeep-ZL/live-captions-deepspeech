@@ -1,3 +1,4 @@
+import json
 import deepspeech
 import numpy as np
 import webrtcvad
@@ -8,14 +9,11 @@ from collections import deque
 import tkinter as tk
 from threading import Thread
 
-maxlen=40 #todo optimize
 
 class VADAudio:
     """Filter & segment audio with voice activity detection."""
 
     frame_duration_ms = 30 # must be 10, 20, or 30
-    idle_endurance=5 # after there being no sound for a few seconds, hide the window
-    timeout=idle_endurance
     sample_rate = 16000 # must be 16000
     buffer_queue = queue.Queue()
     
@@ -23,6 +21,7 @@ class VADAudio:
         def callback(in_data, frame_count, time_info, status):
             self.buffer_queue.put(in_data)
             return (None, pyaudio.paContinue)
+        VADAudio.timeout=config["idle_endurance"]
         self.pa = pyaudio.PyAudio()
         self.device = self.getLoopbackDevice()
         self.input_rate = int(self.device["defaultSampleRate"])
@@ -108,7 +107,7 @@ class VADAudio:
                 frames = self.frame_generator()
                 frame=next(frames)
                 root.deiconify()
-                VADAudio.timeout=VADAudio.idle_endurance
+                VADAudio.timeout=config["idle_endurance"] # after there being no sound for a few seconds, hide the window
             if len(frame) < 640: # it means, sample_rate * frame_duration_ms / 1000 * 2 must be larger than 640
                 # print(len(frame))
                 # print(self.frame_per_buffer) # should be equal to len(frame)
@@ -141,7 +140,7 @@ def splitLines(text):
     j=0
     for i in range(len(array)):
         length+=1+len(array[i])
-        if length>maxlen:
+        if length>config["maxlen"]:
             lines.append(" ".join(array[j:i]))
             j=i
             length=0
@@ -181,23 +180,23 @@ def create_window():
     root = tk.Tk()
     root.overrideredirect(True) # remove title bar
     root.configure(bg="black")
-    root.attributes('-alpha', 0.75)
+    root.attributes('-alpha', config["opacity"])
     root.wm_attributes('-topmost', True)
     
     screen_width = root.winfo_screenwidth()
     screen_height = root.winfo_screenheight()
-    window_width = 500
-    window_height = 45
+    window_width = config["window_width"]
+    window_height = config["window_height"]
     x = (screen_width - window_width) //2
     y = int((screen_height - window_height) *.8)
     root.geometry(f"{window_width}x{window_height}+{x}+{y}")
 
     font={
-        "font":("Courier New",14),
-        "fg":"white",
-        "bg":"black",
+        "font":(config["font_type"],config["font_size"]),
+        "fg":config["fg"],
+        "bg":config["bg"],
         "cursor":"arrow",
-        "height":2, # number of rows
+        "height":config["rows"], # number of rows
     }
     caption = tk.Text(root,**font)
     caption.insert(tk.END,"Live Caption")
@@ -218,10 +217,11 @@ def create_window():
     return root, caption
 
 # todo 降低延迟
-# todo config 文件
 # todo 美化界面
 
 if __name__ == "__main__":
+    with open("config.json") as f:
+        config=json.loads(f.read())
     try:
         root, caption=create_window()
         string_buffer=""
