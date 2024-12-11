@@ -8,5 +8,7 @@
     "fg":"white",
     "bg":"black",
     "font_type":"Courier New",
-    "font_size":14
+    "font_size":14,
+    "model":"models/deepspeech-0.9.3-models.pbmm",
+    "scorer":"models/deepspeech-0.9.3-models.scorer"
 }

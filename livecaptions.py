@@ -155,8 +155,8 @@ def setCaption(text,flag):
     caption.replace("1.0","2.end",temp)
 
 def transcribe():
-    model = deepspeech.Model('models/deepspeech-0.9.3-models.pbmm')
-    model.enableExternalScorer('models/deepspeech-0.9.3-models.scorer')
+    model = deepspeech.Model(config.model)
+    model.enableExternalScorer(config.scorer)
     stream = model.createStream()
     frames = VADAudio().vad_collector()
     count=0
