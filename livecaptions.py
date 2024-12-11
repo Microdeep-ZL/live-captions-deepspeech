@@ -4,27 +4,31 @@ import webrtcvad
 import pyaudiowpatch as pyaudio
 from scipy import signal
 import queue
-from halo import Halo
 from collections import deque
+import tkinter as tk
+from threading import Thread
 
+maxlen=40 #todo optimize
 
 class VADAudio:
     """Filter & segment audio with voice activity detection."""
 
     frame_duration_ms = 30 # must be 10, 20, or 30
+    idle_endurance=5 # after there being no sound for a few seconds, hide the window
+    timeout=idle_endurance
     sample_rate = 16000 # must be 16000
+    buffer_queue = queue.Queue()
     
     def __init__(self):
         def callback(in_data, frame_count, time_info, status):
             self.buffer_queue.put(in_data)
             return (None, pyaudio.paContinue)
-        self.buffer_queue = queue.Queue()
         self.pa = pyaudio.PyAudio()
         self.device = self.getLoopbackDevice()
         self.input_rate = int(self.device["defaultSampleRate"])
         self.frame_per_buffer=int(self.frame_duration_ms*self.device["defaultSampleRate"]/1000)
         self.channels=self.device["maxInputChannels"]
-        self.vad = webrtcvad.Vad(mode=3) # mode can be 1, 2 or 3, higher value means it's stricter
+        self.vad = webrtcvad.Vad(mode=3) # mode (aka aggressiveness) can be 1, 2 or 3, higher value means it's stricter
         self.pa.open(
             format=pyaudio.paInt16,
             channels= self.channels,
@@ -35,9 +39,9 @@ class VADAudio:
             stream_callback= callback,
         ).start_stream()
 
-        print(self.input_rate) # 48000
-        print(self.frame_per_buffer) # 1440
-        print(self.channels) # 2
+        # print(self.input_rate) # 48000
+        # print(self.frame_per_buffer) # 1440
+        # print(self.channels) # 2
         
     def getLoopbackDevice(self):
         try:
@@ -65,7 +69,7 @@ class VADAudio:
 
     def read_resampled(self):
         """Return a block of audio data resampled to 16000hz, blocking if necessary."""
-        data16 = np.frombuffer(self.buffer_queue.get(), dtype=np.int16)
+        data16 = np.frombuffer(self.read(), dtype=np.int16)
         data16=data16[::self.channels] # select only one channel
         resample_size = int(len(data16) / self.input_rate * self.sample_rate)
         result = signal.resample(data16, resample_size).astype(np.int16).tobytes()
@@ -73,7 +77,7 @@ class VADAudio:
  
     def read(self):
         """Return a block of audio data, blocking if necessary."""
-        return self.buffer_queue.get()
+        return self.buffer_queue.get(timeout=VADAudio.timeout)
 
     def frame_generator(self):
         """Generator that yields all audio frames from speaker/headphones."""
@@ -85,57 +89,146 @@ class VADAudio:
                 yield self.read_resampled()
 
     def vad_collector(self, padding_ms=300, ratio=0.75):
-       """Generator that yields series of consecutive audio frames comprising each utterence, separated by yielding a single None.
-           Determines voice activity by ratio of frames in padding_ms. Uses a buffer to include padding_ms prior to being triggered.
-           Example: (frame, ..., frame, None, frame, ..., frame, None, ...)
-                     |---utterence---|        |---utterence---|
-       """
-       frames = self.frame_generator()
-       num_padding_frames = padding_ms // self.frame_duration_ms
-       ring_buffer = deque(maxlen=num_padding_frames)
-       triggered = False
- 
-       for frame in frames:
-           if len(frame) < 640: # it means, sample_rate * frame_duration_ms / 1000 * 2 must be larger than 640
-               print(len(frame))
-               print(self.frame_per_buffer)
-               return
+        """Generator that yields series of consecutive audio frames comprising each utterence, separated by yielding a single None.
+            Determines voice activity by ratio of frames in padding_ms. Uses a buffer to include padding_ms prior to being triggered.
+            Example: (frame, ..., frame, None, frame, ..., frame, None, ...)
+                      |---utterence---|        |---utterence---|
+        """
+        frames = self.frame_generator()
+        num_padding_frames = padding_ms // self.frame_duration_ms
+        ring_buffer = deque(maxlen=num_padding_frames)
+        triggered = False
 
-           is_speech = self.vad.is_speech(frame, self.sample_rate)
- 
-           if not triggered:
-               ring_buffer.append((frame, is_speech))
-               num_voiced = len([f for f, speech in ring_buffer if speech])
-               if num_voiced > ratio * ring_buffer.maxlen:
-                   triggered = True
-                   for f, s in ring_buffer:
-                       yield f
-                   ring_buffer.clear()
- 
-           else:
-               yield frame
-               ring_buffer.append((frame, is_speech))
-               num_unvoiced = len([f for f, speech in ring_buffer if not speech])
-               if num_unvoiced > ratio * ring_buffer.maxlen:
-                   triggered = False
-                   yield None
-                   ring_buffer.clear()
-model = deepspeech.Model('models/deepspeech-0.9.3-models.pbmm')
-model.enableExternalScorer('models/deepspeech-0.9.3-models.scorer')
-stream = model.createStream()
+        while 1:
+            try:
+                frame=next(frames)
+            except queue.Empty:
+                root.withdraw()
+                VADAudio.timeout=None
+                frames = self.frame_generator()
+                frame=next(frames)
+                root.deiconify()
+                VADAudio.timeout=VADAudio.idle_endurance
+            if len(frame) < 640: # it means, sample_rate * frame_duration_ms / 1000 * 2 must be larger than 640
+                # print(len(frame))
+                # print(self.frame_per_buffer) # should be equal to len(frame)
+                return
 
-vad_audio = VADAudio()
-frames = vad_audio.vad_collector()
-spinner = Halo(spinner='line')
+            is_speech = self.vad.is_speech(frame, self.sample_rate)
 
-for frame in frames:
-    if frame is not None:
-        if spinner: spinner.start()
-        stream.feedAudioContent(np.frombuffer(frame, np.int16))
-    else:
-        if spinner: spinner.stop()
-        print("end utterence")
-        text = stream.finishStream()
-        print("Recognized: %s" % text)
-        stream = model.createStream()
-# todo 显示字幕
+            if not triggered:
+                ring_buffer.append((frame, is_speech))
+                num_voiced = len([f for f, speech in ring_buffer if speech])
+                if num_voiced > ratio * ring_buffer.maxlen:
+                    triggered = True
+                    for f, s in ring_buffer:
+                        yield f
+                    ring_buffer.clear()
+            else:
+                yield frame
+                ring_buffer.append((frame, is_speech))
+                num_unvoiced = len([f for f, speech in ring_buffer if not speech])
+                if num_unvoiced > ratio * ring_buffer.maxlen:
+                    triggered = False
+                    yield None
+                    ring_buffer.clear()
+
+def splitLines(text):
+    '''if longer than one line, split into two lines'''
+    lines=[]
+    array=text.split()
+    length=0
+    j=0
+    for i in range(len(array)):
+        length+=1+len(array[i])
+        if length>maxlen:
+            lines.append(" ".join(array[j:i]))
+            j=i
+            length=0
+    lines.append(" ".join(array[j:]))
+    return "\n".join(lines[-2:])
+
+def setCaption(text,flag):
+    global string_buffer
+    temp=splitLines(string_buffer+" "+text)
+    if flag=="finish":
+        string_buffer=temp
+    caption.replace("1.0","2.end",temp)
+
+def transcribe():
+    model = deepspeech.Model('models/deepspeech-0.9.3-models.pbmm')
+    model.enableExternalScorer('models/deepspeech-0.9.3-models.scorer')
+    stream = model.createStream()
+    frames = VADAudio().vad_collector()
+    count=0
+    try:
+        while 1:
+            frame=next(frames)
+            if frame is not None:
+                count+=1
+                stream.feedAudioContent(np.frombuffer(frame, np.int16))
+                if count*VADAudio.frame_duration_ms/1000>0.5: # update every 0.5 seconds
+                    count=0
+                    setCaption(stream.intermediateDecode(),"intermediate")
+            else:
+                count=0
+                setCaption(stream.finishStream(),"finish")
+                stream = model.createStream()
+    except Exception:
+        pass
+
+def create_window():
+    root = tk.Tk()
+    root.overrideredirect(True) # remove title bar
+    root.configure(bg="black")
+    root.attributes('-alpha', 0.75)
+    root.wm_attributes('-topmost', True)
+    
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+    window_width = 500
+    window_height = 45
+    x = (screen_width - window_width) //2
+    y = int((screen_height - window_height) *.8)
+    root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+
+    font={
+        "font":("Courier New",14),
+        "fg":"white",
+        "bg":"black",
+        "cursor":"arrow",
+        "height":2, # number of rows
+    }
+    caption = tk.Text(root,**font)
+    caption.insert(tk.END,"Live Caption")
+    caption.pack(fill="both")
+
+    def start_move(event):
+        root.x = event.x
+        root.y = event.y
+
+    def on_motion(event):
+        delta_x = event.x - root.x
+        delta_y = event.y - root.y
+        root.geometry(f"+{root.winfo_x() + delta_x}+{root.winfo_y() + delta_y}")
+
+    root.bind('<Button-1>', start_move)
+    root.bind('<B1-Motion>', on_motion)
+
+    return root, caption
+
+# todo 降低延迟
+# todo config 文件
+# todo 美化界面
+
+if __name__ == "__main__":
+    try:
+        root, caption=create_window()
+        string_buffer=""
+        t=Thread(target=transcribe)
+        t.start()
+        root.mainloop()
+    except KeyboardInterrupt:
+        VADAudio.buffer_queue.put(None)
+        t.join()
+        root.destroy()
